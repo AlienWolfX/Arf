@@ -7,15 +7,44 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
+    <!-- Server status text -->
+    <TextView
+        android:id="@+id/serverStatusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Server Inactive"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="#000000"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginTop="32dp" />
+
     <!-- Button to start server -->
     <Button
         android:id="@+id/startServerButton"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="Start Server"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/serverStatusText"
+        app:layout_constraintBottom_toTopOf="@+id/stopServerButton"
         app:layout_constraintLeft_toLeftOf="parent"
-        app:layout_constraintRight_toRightOf="parent" />
+        app:layout_constraintRight_toRightOf="parent"
+        android:layout_marginTop="16dp" />
+
+    <!-- Button to stop server -->
+    <Button
+        android:id="@+id/stopServerButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="#FF0000"
+        android:textColor="#FFFFFF"
+        android:text="Stop Server"
+        app:layout_constraintTop_toBottomOf="@id/startServerButton"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginTop="16dp" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

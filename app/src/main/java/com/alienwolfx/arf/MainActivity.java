@@ -1,45 +1,84 @@
-package com.alienwolfx.arf;
+    package com.alienwolfx.arf;
 
-import android.os.Bundle;
-import android.view.View;
-import android.widget.Button;
+    import android.os.Bundle;
+    import android.view.Menu;
+    import android.view.MenuItem;
+    import android.widget.Button;
+    import android.widget.TextView;
 
-import androidx.appcompat.app.AppCompatActivity;
+    import androidx.appcompat.app.AlertDialog;
+    import androidx.appcompat.app.AppCompatActivity;
 
-import java.io.IOException;
+    import java.io.IOException;
 
-public class MainActivity extends AppCompatActivity {
+    public class MainActivity extends AppCompatActivity {
 
-    private MyHttpServer server;
+        private MyHttpServer server;
+        private TextView statusText;
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+        @Override
+        protected void onCreate(Bundle savedInstanceState) {
+            super.onCreate(savedInstanceState);
+            setContentView(R.layout.activity_main);
 
-        Button startServerButton = findViewById(R.id.startServerButton);
+            statusText = findViewById(R.id.serverStatusText);
 
-        startServerButton.setOnClickListener(v -> {
-            startServer();
-        });
-    }
+            Button startServerButton = findViewById(R.id.startServerButton);
+            Button stopServerButton = findViewById(R.id.stopServerButton);
 
-    private void startServer() {
-        if (server == null) {
-            try {
-                server = new MyHttpServer();
-                server.start();
-            } catch (IOException e) {
-                e.printStackTrace();
+            startServerButton.setOnClickListener(v -> startServer());
+            stopServerButton.setOnClickListener(v -> stopServer());
+        }
+
+        @Override
+        public boolean onCreateOptionsMenu(Menu menu) {
+            getMenuInflater().inflate(R.menu.main_menu, menu);
+            return true;
+        }
+
+        @Override
+        public boolean onOptionsItemSelected(MenuItem item) {
+            if (item.getItemId() == R.id.action_about) {
+                showAboutDialog();
+                return true;
+            }
+            return super.onOptionsItemSelected(item);
+        }
+
+        private void showAboutDialog() {
+            new AlertDialog.Builder(this)
+                    .setTitle("About Me")
+                    .setMessage("This app was created by AlienWolfX.\nVersion 1.0\n\nThanks for using it!")
+                    .setPositiveButton("OK", null)
+                    .show();
+        }
+
+        private void startServer() {
+            if (server == null) {
+                try {
+                    server = new MyHttpServer();
+                    server.start();
+                    statusText.setText("Server Active");
+                } catch (IOException e) {
+                    statusText.setText("Error starting server");
+                    e.printStackTrace();
+                }
+            } else {
+                statusText.setText("Server already running");
             }
         }
-    }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (server != null) {
-            server.stop();
+        private void stopServer() {
+            if (server != null) {
+                server.stop();
+                server = null;
+                statusText.setText("Server Inactive");
+            }
+        }
+
+        @Override
+        protected void onDestroy() {
+            super.onDestroy();
+            stopServer();
         }
     }
-}
