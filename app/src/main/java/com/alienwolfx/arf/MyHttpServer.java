@@ -2,6 +2,10 @@ package com.alienwolfx.arf;
 
 import android.os.Build;
 import com.google.gson.Gson;
+
+import java.util.HashMap;
+import java.util.Map;
+
 import fi.iki.elonen.NanoHTTPD;
 
 public class MyHttpServer extends NanoHTTPD {
@@ -31,12 +35,51 @@ public class MyHttpServer extends NanoHTTPD {
             String jsonResponse = gson.toJson(deviceInfo); // Convert device info to JSON
             return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
         }
+        else if ("/add".equals(uri) && Method.POST.equals(session.getMethod())) {
+            try {
+                Map<String, String> files = new HashMap<>();
+                session.parseBody(files);
+
+                String json = files.get("postData");
+
+                AddRequest addRequest = gson.fromJson(json, AddRequest.class);
+
+                int sum = addRequest.getA() + addRequest.getB();
+
+                AddResponse addResponse = new AddResponse(sum);
+                String jsonResponse = gson.toJson(addResponse);
+                return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+            } catch (Exception e) {
+                e.printStackTrace();
+                return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error parsing request");
+            }
+        }
+
         else {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "404 Not Found");
         }
     }
 
-    // Method to collect device information
+    private static class AddRequest {
+        private int a;
+        private int b;
+
+        public int getA() { return a; }
+        public int getB() { return b; }
+    }
+
+    private static class AddResponse {
+        private int result;
+
+        public AddResponse(int result) {
+            this.result = result;
+        }
+
+        public int getResult() {
+            return result;
+        }
+    }
+
     private DeviceInfo getDeviceInfo() {
         String model = Build.MODEL;
         String manufacturer = Build.MANUFACTURER;
@@ -47,7 +90,6 @@ public class MyHttpServer extends NanoHTTPD {
         return new DeviceInfo(model, manufacturer, version, serial);
     }
 
-    // DeviceInfo class to represent the structure of your JSON response
     private static class DeviceInfo {
         private String model;
         private String manufacturer;
