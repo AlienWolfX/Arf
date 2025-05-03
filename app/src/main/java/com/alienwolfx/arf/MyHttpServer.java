@@ -86,7 +86,6 @@ public class MyHttpServer extends NanoHTTPD {
         String version = Build.VERSION.RELEASE;
         String serial = Build.SERIAL;
 
-        // You can also add other device details as needed.
         return new DeviceInfo(model, manufacturer, version, serial);
     }
 

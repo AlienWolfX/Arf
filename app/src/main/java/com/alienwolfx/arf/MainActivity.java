@@ -1,6 +1,7 @@
     package com.alienwolfx.arf;
 
     import android.os.Bundle;
+    import android.text.util.Linkify;
     import android.view.Menu;
     import android.view.MenuItem;
     import android.widget.Button;
@@ -46,11 +47,16 @@
         }
 
         private void showAboutDialog() {
-            new AlertDialog.Builder(this)
+            AlertDialog dialog = new AlertDialog.Builder(this)
                     .setTitle("About Me")
-                    .setMessage("This app was created by AlienWolfX.\nVersion 1.0\n\nThanks for using it!")
+                    .setMessage("This app was created with ❤️ by AlienWolfX.\n\nVersion 1.0.0-Alpha\n\nVisit: https://github.com/AlienWolfX")
                     .setPositiveButton("OK", null)
                     .show();
+
+            TextView messageView = (TextView) dialog.findViewById(android.R.id.message);
+            if (messageView != null) {
+                Linkify.addLinks(messageView, Linkify.WEB_URLS);
+            }
         }
 
         private void startServer() {
