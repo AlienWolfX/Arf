@@ -9,6 +9,10 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.StatFs;
+import android.content.ContentValues;
+import android.app.PendingIntent;
+import android.content.Intent;
+import android.util.Log;
 import com.google.gson.Gson;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -39,13 +43,25 @@ import fi.iki.elonen.NanoHTTPD;
 
 public class MyHttpServer extends NanoHTTPD {
 
+    private static final Gson GSON = new Gson();
     private static final Pattern API_PATTERN = Pattern.compile("/api/v1/(\\d{4})");
+    private static final String ACTION_SMS_SENT = "SMS_SENT";
+    private static final String ACTION_SMS_DELIVERED = "SMS_DELIVERED";
+    private static final String MIME_TYPE_JSON = "application/json";
     private final Gson gson;
     private final Context context;
+    private final ContentResolver contentResolver;
+    private final ActivityManager activityManager;
+    private final TelephonyManager telephonyManager;
+    private final ConnectivityManager connectivityManager;
 
     public MyHttpServer(Context context) {
         super(8000);
         this.context = context;
+        this.contentResolver = context.getContentResolver();
+        this.activityManager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+        this.telephonyManager = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+        this.connectivityManager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         gson = new Gson();
     }
 
@@ -61,7 +77,7 @@ public class MyHttpServer extends NanoHTTPD {
 
         ApiResponse errorResponse = new ApiResponse(false, "404 Not Found", null);
         String jsonResponse = gson.toJson(errorResponse);
-        return newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json", jsonResponse);
+        return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_TYPE_JSON, jsonResponse);
     }
 
     private Response handleApiRequest(int funcNo, IHTTPSession session) {
@@ -83,61 +99,103 @@ public class MyHttpServer extends NanoHTTPD {
             default:
                 ApiResponse errorResponse = new ApiResponse(false, "Function not found", null);
                 String jsonResponse = gson.toJson(errorResponse);
-                return newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json", jsonResponse);
+                return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_TYPE_JSON, jsonResponse);
         }
     }
 
     private Response handleDeviceInfo() {
         DeviceInfo deviceInfo = getDeviceInfo();
-        ApiResponse response = new ApiResponse(true, "Success", deviceInfo);
-        String jsonResponse = gson.toJson(response);
-        return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+        String jsonResponse = GSON.toJson(new ApiResponse(true, "Success", deviceInfo));
+        return newFixedLengthResponse(Response.Status.OK, MIME_TYPE_JSON, jsonResponse);
     }
 
     private Response handleSystemResources() {
         SystemResources resources = getSystemResources();
         ApiResponse response = new ApiResponse(true, "Success", resources);
         String jsonResponse = gson.toJson(response);
-        return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+        return newFixedLengthResponse(Response.Status.OK, MIME_TYPE_JSON, jsonResponse);
     }
 
     private Response handleSmsMessages() {
         List<SmsMessage> messages = getSmsMessages();
         ApiResponse response = new ApiResponse(true, "Success", messages);
         String jsonResponse = gson.toJson(response);
-        return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+        return newFixedLengthResponse(Response.Status.OK, MIME_TYPE_JSON, jsonResponse);
     }
 
     private Response handleSendSms(IHTTPSession session) {
         if (!Method.POST.equals(session.getMethod())) {
-            ApiResponse errorResponse = new ApiResponse(false, "Method not allowed", null);
-            String jsonResponse = gson.toJson(errorResponse);
-            return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "application/json", jsonResponse);
+            return createErrorResponse("Method not allowed", Response.Status.METHOD_NOT_ALLOWED);
         }
 
         try {
             Map<String, String> files = new HashMap<>();
             session.parseBody(files);
             String json = files.get("postData");
+            if (json == null) {
+                return createErrorResponse("Missing request body", Response.Status.BAD_REQUEST);
+            }
+
             SendSmsRequest request = gson.fromJson(json, SendSmsRequest.class);
+            if (request == null || request.getPhoneNumber() == null || request.getMessage() == null) {
+                return createErrorResponse("Invalid SMS request format", Response.Status.BAD_REQUEST);
+            }
 
-            SmsManager smsManager = SmsManager.getDefault();
-            smsManager.sendTextMessage(
-                request.getPhoneNumber(),
-                null,
-                request.getMessage(),
-                null,
-                null
-            );
+            try {
+                SmsManager smsManager = SmsManager.getDefault();
+                
+                // Create pending intents for monitoring SMS status
+                PendingIntent sentPI = PendingIntent.getBroadcast(context, 0, 
+                    new Intent(ACTION_SMS_SENT), PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
+                PendingIntent deliveredPI = PendingIntent.getBroadcast(context, 0,
+                    new Intent(ACTION_SMS_DELIVERED), PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
 
-            ApiResponse response = new ApiResponse(true, "SMS sent successfully", null);
-            String jsonResponse = gson.toJson(response);
-            return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+                if (request.getMessage().length() > 160) {
+                    // Handle long messages
+                    ArrayList<String> parts = smsManager.divideMessage(request.getMessage());
+                    
+                    smsManager.sendMultipartTextMessage(
+                        request.getPhoneNumber(),
+                        null,
+                        parts,
+                            (ArrayList<PendingIntent>) Collections.nCopies(parts.size(), sentPI),
+                            (ArrayList<PendingIntent>) Collections.nCopies(parts.size(), deliveredPI)
+                    );
+                } else {
+                    smsManager.sendTextMessage(
+                        request.getPhoneNumber(),
+                        null,
+                        request.getMessage(),
+                        sentPI,
+                        deliveredPI
+                    );
+                }
+
+                // Save to sent folder manually for Android 4.4.4
+                ContentValues values = new ContentValues();
+                values.put("address", request.getPhoneNumber());
+                values.put("body", request.getMessage());
+                values.put("type", 2); // 2 = sent message
+                values.put("read", 1);
+                values.put("date", System.currentTimeMillis());
+
+                try {
+                    context.getContentResolver().insert(Uri.parse("content://sms/sent"), values);
+                } catch (Exception e) {
+                    Log.e("MyHttpServer", "Error message", e);
+                }
+
+                return createSuccessResponse("SMS sent successfully", null);
+            } catch (SecurityException se) {
+                return createErrorResponse("SMS permission denied: " + se.getMessage(), 
+                                        Response.Status.FORBIDDEN);
+            } catch (Exception e) {
+                return createErrorResponse("Failed to send SMS: " + e.getMessage(), 
+                                        Response.Status.INTERNAL_ERROR);
+            }
         } catch (Exception e) {
-            e.printStackTrace();
-            ApiResponse errorResponse = new ApiResponse(false, "Error sending SMS: " + e.getMessage(), null);
-            String jsonResponse = gson.toJson(errorResponse);
-            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json", jsonResponse);
+            return createErrorResponse("Error processing request: " + e.getMessage(), 
+                                     Response.Status.INTERNAL_ERROR);
         }
     }
 
@@ -145,7 +203,7 @@ public class MyHttpServer extends NanoHTTPD {
         if (!Method.POST.equals(session.getMethod())) {
             ApiResponse errorResponse = new ApiResponse(false, "Method not allowed", null);
             String jsonResponse = gson.toJson(errorResponse);
-            return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, "application/json", jsonResponse);
+            return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, MIME_TYPE_JSON, jsonResponse);
         }
 
         try {
@@ -155,7 +213,7 @@ public class MyHttpServer extends NanoHTTPD {
             ShellCommandRequest request = gson.fromJson(json, ShellCommandRequest.class);
 
             Process process = Runtime.getRuntime().exec(request.getCommand());
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()), 8192);
             StringBuilder output = new StringBuilder();
             String line;
             while ((line = reader.readLine()) != null) {
@@ -170,12 +228,12 @@ public class MyHttpServer extends NanoHTTPD {
             
             ApiResponse response = new ApiResponse(true, "Command executed successfully", shellResponse);
             String jsonResponse = gson.toJson(response);
-            return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+            return newFixedLengthResponse(Response.Status.OK, MIME_TYPE_JSON, jsonResponse);
         } catch (Exception e) {
-            e.printStackTrace();
+            Log.e("MyHttpServer", "Error message", e);
             ApiResponse errorResponse = new ApiResponse(false, "Error executing command: " + e.getMessage(), null);
             String jsonResponse = gson.toJson(errorResponse);
-            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json", jsonResponse);
+            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_TYPE_JSON, jsonResponse);
         }
     }
 
@@ -183,19 +241,18 @@ public class MyHttpServer extends NanoHTTPD {
         SimInfo simInfo = getSimInfo();
         ApiResponse response = new ApiResponse(true, "Success", simInfo);
         String jsonResponse = gson.toJson(response);
-        return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+        return newFixedLengthResponse(Response.Status.OK, MIME_TYPE_JSON, jsonResponse);
     }
 
     private Response handleNetworkStats() {
         NetworkStats stats = getNetworkStats();
         ApiResponse response = new ApiResponse(true, "Success", stats);
         String jsonResponse = gson.toJson(response);
-        return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse);
+        return newFixedLengthResponse(Response.Status.OK, MIME_TYPE_JSON, jsonResponse);
     }
 
     private SystemResources getSystemResources() {
         ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
-        ActivityManager activityManager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
         activityManager.getMemoryInfo(memoryInfo);
 
         StatFs stat = new StatFs(Environment.getDataDirectory().getPath());
@@ -218,16 +275,13 @@ public class MyHttpServer extends NanoHTTPD {
 
     private List<SmsMessage> getSmsMessages() {
         List<SmsMessage> messages = new ArrayList<>();
-        try {
-            ContentResolver contentResolver = context.getContentResolver();
-            Cursor cursor = contentResolver.query(
-                Uri.parse("content://sms/inbox"),
-                new String[]{"address", "body", "date"},
-                null,
-                null,
-                "date DESC LIMIT 10"
-            );
-
+        try (Cursor cursor = contentResolver.query(
+            Uri.parse("content://sms/inbox"),
+            new String[]{"address", "body", "date"},
+            null,
+            null,
+            "date DESC LIMIT 10"
+        )) {
             if (cursor != null) {
                 while (cursor.moveToNext()) {
                     String address = cursor.getString(cursor.getColumnIndexOrThrow("address"));
@@ -235,10 +289,9 @@ public class MyHttpServer extends NanoHTTPD {
                     long date = cursor.getLong(cursor.getColumnIndexOrThrow("date"));
                     messages.add(new SmsMessage(address, body, date));
                 }
-                cursor.close();
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            Log.e("MyHttpServer", "Error message", e);
         }
         return messages;
     }
@@ -247,25 +300,52 @@ public class MyHttpServer extends NanoHTTPD {
         String model = Build.MODEL;
         String manufacturer = Build.MANUFACTURER;
         String version = Build.VERSION.RELEASE;
-        String serial = Build.SERIAL;
+        String serial = "";
+        
+        // Handle serial number for different API levels
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                serial = Build.SERIAL;
+            } else {
+                serial = Build.SERIAL != null ? Build.SERIAL : "";
+            }
+        } catch (Exception e) {
+            Log.e("MyHttpServer", "Error message", e);
+        }
         
         String imei = "";
         String esn = "";
         
         try {
-            TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
-            if (tm != null) {
+            if (telephonyManager != null) {
+                // For Android 4.4.4, only use getDeviceId()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    imei = tm.getImei();
+                    try {
+                        imei = telephonyManager.getImei();
+                    } catch (SecurityException se) {
+                        imei = "";
+                    }
                 } else {
-                    imei = tm.getDeviceId();
+                    try {
+                        imei = telephonyManager.getDeviceId();
+                    } catch (SecurityException se) {
+                        imei = "";
+                    }
                 }
-                esn = tm.getDeviceId(TelephonyManager.PHONE_TYPE_CDMA);
+
+                // Only try to get CDMA device ID on supported devices
+                try {
+                    if (telephonyManager.getPhoneType() == TelephonyManager.PHONE_TYPE_CDMA) {
+                        esn = telephonyManager.getDeviceId();
+                    }
+                } catch (SecurityException se) {
+                    esn = "";
+                }
             }
-        } catch (SecurityException e) {
-            e.printStackTrace();
+        } catch (Exception e) {
+            Log.e("MyHttpServer", "Error message", e);
         }
-    
+
         return new DeviceInfo(model, manufacturer, version, serial, imei, esn);
     }
 
@@ -277,26 +357,24 @@ public class MyHttpServer extends NanoHTTPD {
         long totalTxBytes = TrafficStats.getTotalTxBytes();
         
         // Get network type and status
-        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-        NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
+        NetworkInfo activeNetwork = connectivityManager.getActiveNetworkInfo();
         String networkType = (activeNetwork != null) ? activeNetwork.getTypeName() : "unknown";
         boolean isConnected = activeNetwork != null && activeNetwork.isConnected();
         
         // Get cellular network info
-        TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
         String operator = "";
         String mcc = "";
         String mnc = "";
         int signalStrength = -1;
         
         try {
-            operator = tm.getNetworkOperator();
+            operator = telephonyManager.getNetworkOperator();
             if (operator.length() >= 5) {
                 mcc = operator.substring(0, 3);
                 mnc = operator.substring(3);
             }
             
-            List<CellInfo> cellInfos = tm.getAllCellInfo();
+            List<CellInfo> cellInfos = telephonyManager.getAllCellInfo();
             if (cellInfos != null) {
                 for (CellInfo info : cellInfos) {
                     if (info instanceof CellInfoLte && info.isRegistered()) {
@@ -307,33 +385,35 @@ public class MyHttpServer extends NanoHTTPD {
                 }
             }
         } catch (SecurityException e) {
-            e.printStackTrace();
+            Log.e("MyHttpServer", "Error message", e);
         }
 
         // Get IP addresses
         List<String> ipAddresses = new ArrayList<>();
         try {
             Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
-            for (NetworkInterface netint : Collections.list(nets)) {
+            while (nets.hasMoreElements()) {
+                NetworkInterface netint = nets.nextElement();
                 Enumeration<InetAddress> inetAddresses = netint.getInetAddresses();
-                for (InetAddress inetAddress : Collections.list(inetAddresses)) {
+                while (inetAddresses.hasMoreElements()) {
+                    InetAddress inetAddress = inetAddresses.nextElement();
                     if (!inetAddress.isLoopbackAddress()) {
                         ipAddresses.add(inetAddress.getHostAddress());
                     }
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            Log.e("MyHttpServer", "Error message", e);
         }
 
         // Get DNS servers
         List<String> dnsServers = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
-                Network network = cm.getActiveNetwork();
+                Network network = connectivityManager.getActiveNetwork();
                 if (network != null) {
                     DnsResolver dnsResolver = DnsResolver.getInstance();
-                    LinkProperties linkProperties = cm.getLinkProperties(network);
+                    LinkProperties linkProperties = connectivityManager.getLinkProperties(network);
                     if (linkProperties != null) {
                         dnsServers.addAll(
                             linkProperties.getDnsServers()
@@ -344,7 +424,7 @@ public class MyHttpServer extends NanoHTTPD {
                     }
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                Log.e("MyHttpServer", "Error message", e);
             }
         } else {
             // Fallback for older Android versions
@@ -366,7 +446,7 @@ public class MyHttpServer extends NanoHTTPD {
                     reader.close();
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                Log.e("MyHttpServer", "Error message", e);
             }
         }
 
@@ -406,26 +486,25 @@ public class MyHttpServer extends NanoHTTPD {
         String simSerialNumber = "";
         
         try {
-            TelephonyManager tm = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
-            if (tm != null) {
+            if (telephonyManager != null) {
                 // Get carrier name based on API level
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) { // Android P (API 28) and above
-                    carrierName = tm.getSimCarrierIdName() != null ? tm.getSimCarrierIdName().toString() : "";
+                    carrierName = telephonyManager.getSimCarrierIdName() != null ? telephonyManager.getSimCarrierIdName().toString() : "";
                 } else {
-                    carrierName = tm.getNetworkOperatorName();
+                    carrierName = telephonyManager.getNetworkOperatorName();
                 }
                 
-                countryIso = tm.getSimCountryIso();
-                simOperator = tm.getSimOperator();
-                simState = tm.getSimState();
+                countryIso = telephonyManager.getSimCountryIso();
+                simOperator = telephonyManager.getSimOperator();
+                simState = telephonyManager.getSimState();
                 
                 // Get SIM serial number based on API level
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { // Android O (API 26) and above
-                    simSerialNumber = tm.getSimSerialNumber();
+                    simSerialNumber = telephonyManager.getSimSerialNumber();
                 }
             }
         } catch (SecurityException e) {
-            e.printStackTrace();
+            Log.e("MyHttpServer", "Error message", e);
         }
     
         return new SimInfo(carrierName, countryIso, simOperator, simState, simSerialNumber);
@@ -590,5 +669,17 @@ public class MyHttpServer extends NanoHTTPD {
             this.ipAddresses = ipAddresses;
             this.dnsServers = dnsServers;
         }
+    }
+
+    private Response createErrorResponse(String message, Response.Status status) {
+        ApiResponse errorResponse = new ApiResponse(false, message, null);
+        String jsonResponse = gson.toJson(errorResponse);
+        return newFixedLengthResponse(status, MIME_TYPE_JSON, jsonResponse);
+    }
+
+    private Response createSuccessResponse(String message, Object data) {
+        ApiResponse response = new ApiResponse(true, message, data);
+        String jsonResponse = gson.toJson(response);
+        return newFixedLengthResponse(Response.Status.OK, MIME_TYPE_JSON, jsonResponse);
     }
 }
