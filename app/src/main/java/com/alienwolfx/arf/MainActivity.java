@@ -62,7 +62,7 @@
         private void startServer() {
             if (server == null) {
                 try {
-                    server = new MyHttpServer();
+                    server = new MyHttpServer(this);
                     server.start();
                     statusText.setText("Server Active");
                 } catch (IOException e) {

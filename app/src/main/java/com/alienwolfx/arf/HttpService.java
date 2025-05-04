@@ -13,7 +13,7 @@ public class HttpService extends Service {
     public void onCreate() {
         super.onCreate();
         try {
-            server = new MyHttpServer();
+            server = new MyHttpServer(this);
             server.start();
         } catch (IOException e) {
             e.printStackTrace();
